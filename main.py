@@ -14,6 +14,7 @@ from activity_item import ActivityItem
 GG_API_BASE_URL = 'https://www.geoguessr.com/api'
 GG_CLUB_ACTIVITIES_ENDPOINT = f'{GG_API_BASE_URL}/v4/clubs/{sys.argv[1]}/activities'
 THROTTLE_TIME_MS = 10
+FILTER_OUT_WEEKLIES = True
 
 
 def main():
@@ -68,6 +69,10 @@ def load_items(num_days: int) -> list[ActivityItem]:
 
         # Save activities
         for activity in activities:
+            # if the weekly filter is active and the entry is a weekly
+            if (FILTER_OUT_WEEKLIES and activity.xpReward == 1000):
+                continue
+
             date = activity.recordedAt.split('T')[0]
             days_set.add(date)
             all_activities.append(activity)
