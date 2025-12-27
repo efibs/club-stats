@@ -136,6 +136,7 @@ def plot_items(items: list[ActivityItem]):
     plt.figure(figsize=(8, 4))
     plt.bar(range(len(dates)), xp_sums, width=1.0, color='skyblue', edgecolor='black')
     plt.axhline(avg_xp, color='red', linestyle='--', linewidth=1.5, label=f'Average ({avg_xp:.1f})')
+    plt.axhline(600, color='green', linestyle=':', linewidth=1, label=f'Max')
     plt.xticks(range(len(dates)), [d.isoformat() for d in dates], rotation=90)
     plt.xlabel("Date")
     plt.ylabel("Total XP")
