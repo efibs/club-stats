@@ -9,10 +9,12 @@ from matplotlib import pyplot as plt
 import requests
 
 from activity_item import ActivityItem
+from member import Member
 
 
 GG_API_BASE_URL = 'https://www.geoguessr.com/api'
 GG_CLUB_ACTIVITIES_ENDPOINT = f'{GG_API_BASE_URL}/v4/clubs/{sys.argv[1]}/activities'
+GG_MEMBERS_ENDPOINT = f'{GG_API_BASE_URL}/v4/clubs/{sys.argv[1]}/members'
 THROTTLE_TIME_MS = 10
 FILTER_OUT_WEEKLIES = True
 
@@ -23,8 +25,10 @@ def main():
     num_days = int(sys.argv[2])
 
     items = load_items(num_days)
+    members = load_members()
 
     plot_items(items)
+    write_inactivity_report(items, members)
 
 
 def load_items(num_days: int) -> list[ActivityItem]:
@@ -73,7 +77,13 @@ def load_items(num_days: int) -> list[ActivityItem]:
             if (FILTER_OUT_WEEKLIES and activity.xpReward == 1000):
                 continue
 
+            # Get the date
             date = activity.recordedAt.split('T')[0]
+
+            # If the days set is already full and this is another day
+            if len(days_set) >= num_days and date not in days_set:
+                return all_activities
+
             days_set.add(date)
             all_activities.append(activity)
 
@@ -84,6 +94,30 @@ def load_items(num_days: int) -> list[ActivityItem]:
     return all_activities
 
 
+def load_members() -> list[Member]:
+    # Create a session
+    session = requests.Session()
+
+    # Get the GG API key
+    gg_api_key = os.getenv('GG_API_KEY')
+
+    # Set the ncfa cookie on the session
+    session.cookies.set("_ncfa", gg_api_key)
+
+    # Read the activities
+    response = session.get(GG_MEMBERS_ENDPOINT)
+
+    # Get json data
+    data = response.json()
+
+    # Build the dacite config
+    dacite_config = Config(convert_key=to_camel_case)
+
+    # Deserialize
+    members = [from_dict(Member, item["user"], dacite_config) for item in data]
+
+    return members
+
 def plot_items(items: list[ActivityItem]):
     # Group by date
     xp_by_date = defaultdict(int)
@@ -91,8 +125,8 @@ def plot_items(items: list[ActivityItem]):
         date = datetime.fromisoformat(item.recordedAt).date()
         xp_by_date[date] += item.xpReward
     
-    # Sort by date and skip oldest day as it might not be filled
-    dates = sorted(xp_by_date.keys())[1:]
+    # Sort by date
+    dates = sorted(xp_by_date.keys())
     xp_sums = [xp_by_date[d] for d in dates]
     
     # Compute average XP
@@ -110,6 +144,39 @@ def plot_items(items: list[ActivityItem]):
     plt.tight_layout()
     plt.savefig("xp_per_day.png", dpi=300)
     plt.close()
+
+
+def write_inactivity_report(items: list[ActivityItem], members: list[Member], output_path: str = "inactive_members.txt"):
+    # Build lookup tables
+    user_id_to_nick = {m.userId: m.nick for m in members}
+    all_user_ids = set(user_id_to_nick.keys())
+
+    # Group active userIds by date
+    active_by_date: dict[str, set[str]] = defaultdict(set)
+    for item in items:
+        date = item.recordedAt.split('T')[0]
+        active_by_date[date].add(item.userId)
+
+    # Write report
+    with open(output_path, "w", encoding="utf-8") as f:
+        for date in sorted(active_by_date.keys()):
+            inactive_user_ids = all_user_ids - active_by_date[date]
+
+            # Resolve nicks, fall back to userId if necessary
+            inactive_nicks = sorted(
+                user_id_to_nick.get(user_id, user_id)
+                for user_id in inactive_user_ids
+            )
+
+            f.write(f"Date: {date}\n")
+            if inactive_nicks:
+                for nick in inactive_nicks:
+                    f.write(f"  - {nick}\n")
+            else:
+                f.write("  (No inactive members)\n")
+
+            f.write("\n")
+
 
 
 def to_camel_case(key: str) -> str:
