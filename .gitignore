@@ -2,5 +2,5 @@
 .vscode
 .venv
 __pycache__/
-xp_per_day.png
+xp_per_day*.png
 inactive_members.txt

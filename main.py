@@ -1,3 +1,4 @@
+import argparse
 from collections import defaultdict
 from datetime import datetime
 import os
@@ -13,8 +14,8 @@ from member import Member
 
 
 GG_API_BASE_URL = 'https://www.geoguessr.com/api'
-GG_CLUB_ACTIVITIES_ENDPOINT = f'{GG_API_BASE_URL}/v4/clubs/{sys.argv[1]}/activities'
-GG_MEMBERS_ENDPOINT = f'{GG_API_BASE_URL}/v4/clubs/{sys.argv[1]}/members'
+GG_CLUB_ACTIVITIES_ENDPOINT = f'{GG_API_BASE_URL}/v4/clubs/{{club_id}}/activities'
+GG_MEMBERS_ENDPOINT = f'{GG_API_BASE_URL}/v4/clubs/{{club_id}}/members'
 THROTTLE_TIME_MS = 10
 FILTER_OUT_WEEKLIES = True
 
@@ -22,16 +23,24 @@ FILTER_OUT_WEEKLIES = True
 def main():
     load_dotenv()
 
-    num_days = int(sys.argv[2])
+    p = argparse.ArgumentParser()
 
-    items = load_items(num_days)
-    members = load_members()
+    p.add_argument("--club_id", type=str, required=True)
+    p.add_argument("--num_days", type=int, default=29)
+    p.add_argument("--include_today_in_avg", action='store_true')
+    p.add_argument("--include_member_stats", action='store_true')
 
-    plot_items(items)
-    write_inactivity_report(items, members)
+    args = p.parse_args()
+
+    items = load_items(args.num_days, args.club_id)
+    plot_items(items, args.include_today_in_avg)
+    
+    if args.include_member_stats:
+        members = load_members(args.club_id)
+        write_inactivity_report(items, members)
 
 
-def load_items(num_days: int) -> list[ActivityItem]:
+def load_items(num_days: int, club_id: str) -> list[ActivityItem]:
     
     # Get the GG API key
     gg_api_key = os.getenv('GG_API_KEY')
@@ -51,7 +60,7 @@ def load_items(num_days: int) -> list[ActivityItem]:
 
     while len(days_set) <= num_days:
         # Build the final url
-        activities_url = f"{GG_CLUB_ACTIVITIES_ENDPOINT}?limit=25"
+        activities_url = f"{GG_CLUB_ACTIVITIES_ENDPOINT.format(club_id=club_id)}?limit=25"
 
         if pagination_token:
             activities_url += f"&paginationToken={pagination_token}"
@@ -94,7 +103,7 @@ def load_items(num_days: int) -> list[ActivityItem]:
     return all_activities
 
 
-def load_members() -> list[Member]:
+def load_members(club_id: str) -> list[Member]:
     # Create a session
     session = requests.Session()
 
@@ -105,7 +114,7 @@ def load_members() -> list[Member]:
     session.cookies.set("_ncfa", gg_api_key)
 
     # Read the activities
-    response = session.get(GG_MEMBERS_ENDPOINT)
+    response = session.get(GG_MEMBERS_ENDPOINT.format(club_id=club_id))
 
     # Get json data
     data = response.json()
@@ -118,7 +127,7 @@ def load_members() -> list[Member]:
 
     return members
 
-def plot_items(items: list[ActivityItem]):
+def plot_items(items: list[ActivityItem], include_today_in_average: bool):
     # Group by date
     xp_by_date = defaultdict(int)
     for item in items:
@@ -129,8 +138,13 @@ def plot_items(items: list[ActivityItem]):
     dates = sorted(xp_by_date.keys())
     xp_sums = [xp_by_date[d] for d in dates]
     
+    xp_sums_for_avg = xp_sums
+
+    if not include_today_in_average:
+        xp_sums_for_avg = xp_sums[:-1]
+
     # Compute average XP
-    avg_xp = sum(xp_sums) / len(xp_sums)
+    avg_xp = sum(xp_sums_for_avg) / len(xp_sums_for_avg)
 
     # Plot
     plt.figure(figsize=(8, 4))
