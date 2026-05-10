@@ -10,12 +10,14 @@ from matplotlib import pyplot as plt
 import requests
 
 from activity_item import ActivityItem
-from member import Member
+from club import Club
 
 
 GG_API_BASE_URL = 'https://www.geoguessr.com/api'
 GG_CLUB_ACTIVITIES_ENDPOINT = f'{GG_API_BASE_URL}/v4/clubs/{{club_id}}/activities'
-GG_MEMBERS_ENDPOINT = f'{GG_API_BASE_URL}/v4/clubs/{{club_id}}/members'
+GG_CLUB_ENDPOINT = f'{GG_API_BASE_URL}/v4/clubs/{{club_id}}'
+GG_USER_ENDPOINT = f'{GG_API_BASE_URL}/v3/users/{{user_id}}'
+GG_USER_PROFILE_URL = 'https://www.geoguessr.com/user/{user_id}'
 THROTTLE_TIME_MS = 10
 FILTER_OUT_WEEKLIES = True
 
@@ -33,11 +35,15 @@ def main():
     args = p.parse_args()
 
     items = load_items(args.num_days, args.club_id)
-    plot_items(items, args.include_today_in_avg)
-    
+
+    club = load_club(args.club_id)
+
+    plot_items(items, args.include_today_in_avg, club)
+
     if args.include_member_stats:
-        members = load_members(args.club_id)
-        write_inactivity_report(items, members)
+        write_inactivity_report(items, club)
+
+    report_former_members(items, club)
 
 
 def load_items(num_days: int, club_id: str) -> list[ActivityItem]:
@@ -103,31 +109,18 @@ def load_items(num_days: int, club_id: str) -> list[ActivityItem]:
     return all_activities
 
 
-def load_members(club_id: str) -> list[Member]:
-    # Create a session
+def load_club(club_id: str) -> Club:
     session = requests.Session()
-
-    # Get the GG API key
     gg_api_key = os.getenv('GG_API_KEY')
-
-    # Set the ncfa cookie on the session
     session.cookies.set("_ncfa", gg_api_key)
 
-    # Read the activities
-    response = session.get(GG_MEMBERS_ENDPOINT.format(club_id=club_id))
-
-    # Get json data
+    response = session.get(GG_CLUB_ENDPOINT.format(club_id=club_id))
     data = response.json()
 
-    # Build the dacite config
     dacite_config = Config(convert_key=to_camel_case)
+    return from_dict(Club, data, dacite_config)
 
-    # Deserialize
-    members = [from_dict(Member, item["user"], dacite_config) for item in data]
-
-    return members
-
-def plot_items(items: list[ActivityItem], include_today_in_average: bool):
+def plot_items(items: list[ActivityItem], include_today_in_average: bool, club: Club):
     # Group by date
     xp_by_date = defaultdict(int)
     for item in items:
@@ -154,16 +147,16 @@ def plot_items(items: list[ActivityItem], include_today_in_average: bool):
     plt.xticks(range(len(dates)), [d.isoformat() for d in dates], rotation=90)
     plt.xlabel("Date")
     plt.ylabel("Total XP")
-    plt.title("Club XP per day")
+    plt.title(f"Club XP per day — {club.name} [{club.tag}]")
     plt.legend()
     plt.tight_layout()
     plt.savefig("xp_per_day.png", dpi=300)
     plt.close()
 
 
-def write_inactivity_report(items: list[ActivityItem], members: list[Member], output_path: str = "inactive_members.txt"):
+def write_inactivity_report(items: list[ActivityItem], club: Club, output_path: str = "inactive_members.txt"):
     # Build lookup tables
-    user_id_to_nick = {m.userId: m.nick for m in members}
+    user_id_to_nick = {cm.user.userId: cm.user.nick for cm in club.members}
     all_user_ids = set(user_id_to_nick.keys())
 
     # Group active userIds by date
@@ -174,6 +167,7 @@ def write_inactivity_report(items: list[ActivityItem], members: list[Member], ou
 
     # Write report
     with open(output_path, "w", encoding="utf-8") as f:
+        f.write(f"Club: {club.name} [{club.tag}]\n\n")
         for date in sorted(active_by_date.keys()):
             inactive_user_ids = all_user_ids - active_by_date[date]
 
@@ -192,6 +186,68 @@ def write_inactivity_report(items: list[ActivityItem], members: list[Member], ou
 
             f.write("\n")
 
+
+
+def report_former_members(items: list[ActivityItem], club: Club,
+                          plot_path: str = "former_members_xp.png",
+                          text_path: str = "former_members.txt"):
+    current_user_ids = {cm.user.userId for cm in club.members}
+    former_user_ids = {item.userId for item in items} - current_user_ids
+
+    if not former_user_ids:
+        print("No former members with activity found.")
+        return
+
+    # Fetch nicks for former members from the user endpoint
+    session = requests.Session()
+    session.cookies.set("_ncfa", os.getenv('GG_API_KEY'))
+
+    former_user_info: dict[str, tuple[str, str]] = {}
+    for user_id in former_user_ids:
+        response = session.get(GG_USER_ENDPOINT.format(user_id=user_id))
+        if response.status_code == 404:
+            nick = f"[deleted user {user_id}]"
+        else:
+            nick = response.json().get('nick', user_id)
+        profile_url = GG_USER_PROFILE_URL.format(user_id=user_id)
+        former_user_info[user_id] = (nick, profile_url)
+        if THROTTLE_TIME_MS:
+            time.sleep(THROTTLE_TIME_MS / 1000)
+
+    # Text report: nickname + profile link
+    with open(text_path, "w", encoding="utf-8") as f:
+        f.write(f"Club: {club.name} [{club.tag}]\n\n")
+        f.write("Former members with activity in the past period:\n\n")
+        for user_id, (nick, profile_url) in sorted(former_user_info.items(), key=lambda kv: kv[1][0].lower()):
+            f.write(f"  - {nick}: {profile_url}\n")
+
+    # XP per former member per day
+    xp_by_date_by_user: dict[datetime, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for item in items:
+        if item.userId in former_user_ids:
+            date = datetime.fromisoformat(item.recordedAt).date()
+            xp_by_date_by_user[date][item.userId] += item.xpReward
+
+    dates = sorted(xp_by_date_by_user.keys())
+    sorted_user_ids = sorted(former_user_ids, key=lambda u: former_user_info[u][0].lower())
+
+    _, ax = plt.subplots(figsize=(10, 5))
+    bottom = [0] * len(dates)
+    for user_id in sorted_user_ids:
+        nick = former_user_info[user_id][0]
+        values = [xp_by_date_by_user[d].get(user_id, 0) for d in dates]
+        ax.bar(range(len(dates)), values, bottom=bottom, label=nick, edgecolor='black', width=1.0)
+        bottom = [b + v for b, v in zip(bottom, values)]
+
+    ax.set_xticks(range(len(dates)))
+    ax.set_xticklabels([d.isoformat() for d in dates], rotation=90)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("XP")
+    ax.set_title(f"XP by former members — {club.name} [{club.tag}]")
+    ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
 
 def to_camel_case(key: str) -> str:
